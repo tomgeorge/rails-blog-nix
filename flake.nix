@@ -61,53 +61,89 @@
           bundle lock --update
         '';
 
-        source = pkgs.fetchFromGitHub {
+        src = pkgs.fetchFromGitHub {
             owner = "tomgeorge";
             repo = "rails-blog-nix";
-            rev = "2a170e7ead40aa485e2f5ab6666054801026ff77";
-            sha256 = "sha256-G+bYoVkaQLdkWA2gqpOVbcR7IGl13I+kvVuZ0/3s2BY=";
-        };
-
-        precompiledSources = pkgs.stdenv.mkDerivation {
-          name = "precompiled-sources";
-          buildInputs = [ env ];
-          buildPhase = ''
-            mkdir -p $out
-            cd ${env}
-            bundle exec bootsnap precompile --gemfile
-            bundle exec bootsnap precompile app/ lib/
-            SECRET_KEY_BASE_DUMMY=1 rails assets:precompile
-            cp ${source} $out
-          '';
+            rev = "852747a6a0b8bcd0d8216d16b25be4019f6a453a";
+            sha256 = "sha256-kScTyo5ZmSZNO4QGrDxlMqH+kzcoZsX+g/sUgLtqhzU=";
         };
 
       in
       rec {
-        inherit
-          (rubyNix {
+        rubyEnv = (rubyNix {
             inherit gemset ruby;
             name = "my-rails-app";
             gemConfig = pkgs.defaultGemConfig // gemConfig;
-          })
-          env
-          ;
+          }).env;
          
+        assets = pkgs.stdenv.mkDerivation {
+          inherit src;
+          name = "precompiled-sources";
+          buildInputs = [ rubyEnv ];
+          buildPhase = ''
+            runHook preBuild
+            set -x
+            pwd
+            export RAILS_LOG_TO_STDOUT=1
+            export RAILS_ENV="production"
+            bundle exec bootsnap precompile --gemfile
+            bundle exec bootsnap precompile app/ lib/
+            chmod -R +w tmp
+            SECRET_KEY_BASE_DUMMY=1 bundle exec rake assets:precompile
+            mkdir -p $out && cp -r ./public/ $out
+            runHook postBuild
+          '';
+        };
+
+        deploy = pkgs.stdenv.mkDerivation { 
+          inherit src;
+          name = "runtime";
+          buildInputs = [ assets ];
+          installPhase = ''
+            runHook preInstall
+            mkdir -p $out && cp -r . $out
+            cp -r ${assets} $out/assets
+            runHook postInstall
+          '';
+        };
 
         container = pkgs.dockerTools.buildLayeredImage {
           name = "rails-blog";
           tag = "latest";
           contents = [
-            env
-            precompiledSources
-            ruby
+            # TODO: I don't think I actually need this, need to research
+            # ruby
+            deploy
+            rubyEnv
             pkgs.bash
+            pkgs.coreutils
           ];
+          # TODO: Non-root user, ideally the app lives in /rails or /run/rails 
+          # or /app or whatever and it's symlinked to the nix store path
+          # enableFakechroot = true;
+          # fakeRootCommands = ''
+          #   set -x 
+          #   mkdir -p /rails
+          #   ln -s ${deploy}/bin/* /rails
+          #   chown -R 1000:1000 ${deploy}/bin
+          #   chown -R 1000:1000 /rails
+          # '';
+          # extraCommands = ''
+          #   whoami
+          #   chgrp -R 0 /rails
+          #   chmod -R g+rwX /rails
+          # '';
           config = {
-            Cmd = [ "bundle" "exec" "rails" "server" "-b" "0.0.0.0"];
-            WorkingDir = "${precompiledSources}";
+            Cmd = [ "${rubyEnv}/bin/bundle" "exec" "rails" "server" "-b" "0.0.0.0"];
+            # TODO: There is behavior difference between ${rubyEnv/bin/bundle},
+            # /bin/bundle, ${deploy}/bin/bundle, ${deploy}/bin/rails s, etc. 
+            # Cmd = [ "bundle" "exec" "rails" "server" "-b" "0.0.0.0"];
+            WorkingDir = "${deploy}";
             Env = [
-              "HOME=${precompiledSources}"
-              "PWD=${precompiledSources}"
+              "RAILS_LOG_TO_STDOUT=1"
+              "SECRET_KEY_BASE=dummy"
+              "HOME=${deploy}"
+              "PWD=${deploy}"
               "RAILS_ENV=production"
             ];
             ExposedPorts = {
@@ -121,7 +157,7 @@
           dev = pkgs.mkShell {
             buildInputs =
               [
-                env
+                rubyEnv
                 bundixcli
                 bundleLock
                 bundleUpdate
