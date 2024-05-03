@@ -17,6 +17,7 @@
     fu.url = "github:numtide/flake-utils";
     bob-ruby.url = "github:bobvanderlinden/nixpkgs-ruby";
     bob-ruby.inputs.nixpkgs.follows = "nixpkgs";
+    nix2container.url = "github:nlewo/nix2container";
   };
 
   outputs =
@@ -27,6 +28,7 @@
       ruby-nix,
       bundix,
       bob-ruby,
+      nix2container,
     }:
     with fu.lib;
     eachDefaultSystem (
@@ -68,6 +70,8 @@
             sha256 = "sha256-kScTyo5ZmSZNO4QGrDxlMqH+kzcoZsX+g/sUgLtqhzU=";
         };
 
+        nix2containerPkgs = nix2container.packages;
+
       in
       rec {
         rubyEnv = (rubyNix {
@@ -107,16 +111,30 @@
           '';
         };
 
+        othercontainer = nix2containerPkgs.${system}.nix2container.buildImage {
+            name = "localhost/rails-blog-via-nix2container";
+            tag = "latest";
+            config = {
+              Cmd = [ "${rubyEnv}/bin/bundle" "exec" "rails" "server" "-b" "0.0.0.0"];
+              WorkingDir = "${deploy}";
+              Env = [
+                "RAILS_LOG_TO_STDOUT=1"
+                "SECRET_KEY_BASE=dummy"
+                "HOME=${deploy}"
+                "PWD=${deploy}"
+                "RAILS_ENV=production"
+              ];
+              ExposedPorts = {
+                  "3000" = {};
+              };
+            };
+        };
+
         container = pkgs.dockerTools.buildLayeredImage {
           name = "rails-blog";
           tag = "latest";
           contents = [
-            # TODO: I don't think I actually need this, need to research
-            # ruby
-            deploy
             rubyEnv
-            pkgs.bash
-            pkgs.coreutils
           ];
           # TODO: Non-root user, ideally the app lives in /rails or /run/rails 
           # or /app or whatever and it's symlinked to the nix store path
@@ -151,6 +169,7 @@
             };
           };
         };
+        packages.nix2container = othercontainer;
         packages.default = container;
         devShells = rec {
           default = dev;
